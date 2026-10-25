@@ -95,15 +95,13 @@ class PostgresDatabaseEngine implements DatabaseEngine {
     });
   }
 
- 
-   
 async init(): Promise<void> {
   const client = await this.pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    // Create users table first for new databases.
+    // Create users table for fresh databases.
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id VARCHAR(64) PRIMARY KEY,
@@ -112,7 +110,8 @@ async init(): Promise<void> {
       );
     `);
 
-    // Check whether an existing database has the expected ID type.
+    // Migrate legacy INTEGER user IDs and dependent columns.
+    // Existing numeric IDs are preserved as strings.
     const userIdColumn = await client.query(`
       SELECT data_type
       FROM information_schema.columns
@@ -123,15 +122,129 @@ async init(): Promise<void> {
 
     const userIdType = userIdColumn.rows[0]?.data_type;
 
-    if (
-      userIdType &&
-      userIdType !== 'character varying' &&
-      userIdType !== 'text'
-    ) {
+    if (userIdType && !['character varying', 'text'].includes(userIdType)) {
+      // Save and remove every foreign key referencing users.
+      await client.query(`
+        CREATE TEMP TABLE IF NOT EXISTS _user_fk_migration (
+          table_schema_name TEXT,
+          table_name TEXT,
+          constraint_name TEXT,
+          constraint_definition TEXT
+        ) ON COMMIT DROP;
+      `);
+
+      await client.query(`
+        INSERT INTO _user_fk_migration
+        SELECT
+          ns.nspname,
+          tbl.relname,
+          con.conname,
+          pg_get_constraintdef(con.oid)
+        FROM pg_constraint con
+        JOIN pg_class tbl ON tbl.oid = con.conrelid
+        JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
+        WHERE con.contype = 'f'
+          AND con.confrelid = 'users'::regclass
+          AND ns.nspname = current_schema()
+          AND NOT EXISTS (
+            SELECT 1
+            FROM _user_fk_migration old
+            WHERE old.table_schema_name = ns.nspname
+              AND old.table_name = tbl.relname
+              AND old.constraint_name = con.conname
+          );
+      `);
+
+      await client.query(`
+        DO $$
+        DECLARE
+          fk RECORD;
+        BEGIN
+          FOR fk IN
+            SELECT table_schema_name, table_name, constraint_name
+            FROM _user_fk_migration
+          LOOP
+            EXECUTE format(
+              'ALTER TABLE %I.%I DROP CONSTRAINT %I',
+              fk.table_schema_name,
+              fk.table_name,
+              fk.constraint_name
+            );
+          END LOOP;
+        END $$;
+      `);
+
+      // Change users.id to VARCHAR.
+      await client.query(`
+        ALTER TABLE users
+        ALTER COLUMN id TYPE VARCHAR(64)
+        USING id::text;
+      `);
+
+      // Convert known columns referencing users.id.
+      const dependentColumns = [
+        ['sessions', 'user_id'],
+        ['rooms', 'owner_id'],
+        ['room_members', 'user_id'],
+        ['kicked_users', 'user_id'],
+        ['messages', 'sender_id'],
+        ['media', 'sender_id'],
+        ['delivery_states', 'user_id'],
+      ];
+
+      for (const [table, column] of dependentColumns) {
+        const exists = await client.query(
+          `SELECT 1
+           FROM information_schema.columns
+           WHERE table_schema = current_schema()
+             AND table_name = $1
+             AND column_name = $2`,
+          [table, column]
+        );
+
+        if (exists.rowCount) {
+          await client.query(
+            `ALTER TABLE ${table}
+             ALTER COLUMN ${column} TYPE VARCHAR(64)
+             USING ${column}::text`
+          );
+        }
+      }
+
+      // Restore the original foreign-key definitions.
+      await client.query(`
+        DO $$
+        DECLARE
+          fk RECORD;
+        BEGIN
+          FOR fk IN
+            SELECT *
+            FROM _user_fk_migration
+          LOOP
+            EXECUTE format(
+              'ALTER TABLE %I.%I ADD CONSTRAINT %I %s',
+              fk.table_schema_name,
+              fk.table_name,
+              fk.constraint_name,
+              fk.constraint_definition
+            );
+          END LOOP;
+        END $$;
+      `);
+    }
+
+    // Verify the final schema.
+    const verify = await client.query(`
+      SELECT data_type
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'users'
+        AND column_name = 'id';
+    `);
+
+    if (!['character varying', 'text'].includes(verify.rows[0]?.data_type)) {
       throw new Error(
-        `Database schema mismatch: users.id is "${userIdType}", ` +
-        'but this application expects a string ID (VARCHAR). ' +
-        'Migrate the existing database before restarting the server.'
+        `Migration failed: users.id is ${verify.rows[0]?.data_type}`
       );
     }
 
@@ -257,7 +370,7 @@ async init(): Promise<void> {
       );
     `);
 
-    // Message delivery states
+    // Delivery states
     await client.query(`
       CREATE TABLE IF NOT EXISTS delivery_states (
         message_id VARCHAR(64) NOT NULL
@@ -271,7 +384,10 @@ async init(): Promise<void> {
     `);
 
     await client.query('COMMIT');
-    console.log('[2MinChat] PostgreSQL database initialized successfully.');
+
+    console.log(
+      '[2MinChat] PostgreSQL database initialized successfully.'
+    );
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -279,6 +395,7 @@ async init(): Promise<void> {
     client.release();
   }
 }
+
 
 
   async close(): Promise<void> {
