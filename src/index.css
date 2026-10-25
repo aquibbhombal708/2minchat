@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --bg-page: #fcfcfc;
+    --bg-surface: #ffffff;
+    --bg-muted: #f4f4f5;
+    --border-subtle: #e4e4e7;
+    --border-strong: #18181b;
+    --text-primary: #09090b;
+    --text-secondary: #71717a;
+    --text-muted: #a1a1aa;
+  }
+
+  .dark {
+    --bg-page: #09090b;
+    --bg-surface: #121214;
+    --bg-muted: #1c1c1f;
+    --border-subtle: #27272a;
+    --border-strong: #fafafa;
+    --text-primary: #fafafa;
+    --text-secondary: #a1a1aa;
+    --text-muted: #71717a;
+  }
+
+  body {
+    background-color: var(--bg-page);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    margin: 0;
+    padding: 0;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+}
+
+/* Document-style crisp scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #a1a1aa;
+  border-radius: 3px;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+}
+
+/* Privacy blur deterrence & tap-and-hold unblur */
+.privacy-blur {
+  filter: blur(14px);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.privacy-unblur {
+  filter: blur(0px) !important;
+  user-select: auto;
+  -webkit-user-select: auto;
+}
+
+/* Monochrome focus rings */
+input:focus-visible,
+button:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+

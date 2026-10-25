@@ -1,0 +1,6 @@
+{
+  "name": "2MinChat",
+  "description": "Temporary private chat application with strict room access codes, server-authoritative lifetimes, View Once media, and document-style minimalism.",
+  "requestFramePermissions": ["clipboard-read", "clipboard-write", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
