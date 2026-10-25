@@ -95,115 +95,191 @@ class PostgresDatabaseEngine implements DatabaseEngine {
     });
   }
 
-  async init(): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS users (
-          id VARCHAR(64) PRIMARY KEY,
-          name VARCHAR(128) NOT NULL,
-          created_at BIGINT NOT NULL
-        );
+ 
+   
+async init(): Promise<void> {
+  const client = await this.pool.connect();
 
-        CREATE TABLE IF NOT EXISTS sessions (
-          token VARCHAR(128) PRIMARY KEY,
-          user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          created_at BIGINT NOT NULL,
-          expires_at BIGINT NOT NULL
-        );
+  try {
+    await client.query('BEGIN');
 
-        CREATE TABLE IF NOT EXISTS rooms (
-          id VARCHAR(64) PRIMARY KEY,
-          name VARCHAR(128) NOT NULL,
-          code_hash VARCHAR(256) NOT NULL,
-          secret_code_hash VARCHAR(256),
-          is_hidden BOOLEAN NOT NULL DEFAULT FALSE,
-          owner_id VARCHAR(64) NOT NULL REFERENCES users(id),
-          lifetime_hours INT NOT NULL,
-          blur_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-          created_at BIGINT NOT NULL,
-          expires_at BIGINT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_rooms_expires_at ON rooms(expires_at);
-        ALTER TABLE rooms ADD COLUMN IF NOT EXISTS blur_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+    // Create users table first for new databases.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(128) NOT NULL,
+        created_at BIGINT NOT NULL
+      );
+    `);
 
-        CREATE TABLE IF NOT EXISTS room_members (
-          room_id VARCHAR(64) NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-          user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          role VARCHAR(16) NOT NULL,
-          is_locked BOOLEAN NOT NULL DEFAULT FALSE,
-          joined_at BIGINT NOT NULL,
-          PRIMARY KEY (room_id, user_id)
-        );
+    // Check whether an existing database has the expected ID type.
+    const userIdColumn = await client.query(`
+      SELECT data_type
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'users'
+        AND column_name = 'id';
+    `);
 
-        CREATE TABLE IF NOT EXISTS kicked_users (
-          room_id VARCHAR(64) NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-          user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          kicked_at BIGINT NOT NULL,
-          PRIMARY KEY (room_id, user_id)
-        );
+    const userIdType = userIdColumn.rows[0]?.data_type;
 
-        CREATE TABLE IF NOT EXISTS room_access_credentials (
-          key VARCHAR(128) PRIMARY KEY,
-          room_id VARCHAR(64) NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-          failed_attempts INT NOT NULL DEFAULT 0,
-          lock_until BIGINT NOT NULL DEFAULT 0,
-          last_attempt_at BIGINT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS messages (
-          id VARCHAR(64) PRIMARY KEY,
-          room_id VARCHAR(64) NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-          sender_id VARCHAR(64) NOT NULL REFERENCES users(id),
-          sender_name VARCHAR(128) NOT NULL,
-          content TEXT NOT NULL,
-          type VARCHAR(16) NOT NULL,
-          reply_to_id VARCHAR(64),
-          is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-          is_blurred BOOLEAN NOT NULL DEFAULT TRUE,
-          created_at BIGINT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id);
-        ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_blurred BOOLEAN NOT NULL DEFAULT TRUE;
-
-        CREATE TABLE IF NOT EXISTS media (
-          id VARCHAR(64) PRIMARY KEY,
-          room_id VARCHAR(64) NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-          message_id VARCHAR(64) NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-          sender_id VARCHAR(64) NOT NULL REFERENCES users(id),
-          filename VARCHAR(256) NOT NULL,
-          original_name VARCHAR(256) NOT NULL,
-          mime_type VARCHAR(128) NOT NULL,
-          size BIGINT NOT NULL,
-          duration INTEGER,
-          storage_key VARCHAR(256) NOT NULL,
-          is_view_once BOOLEAN NOT NULL DEFAULT FALSE,
-          is_consumed BOOLEAN NOT NULL DEFAULT FALSE,
-          consumed_at BIGINT,
-          created_at BIGINT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_media_room_id ON media(room_id);
-        ALTER TABLE media ADD COLUMN IF NOT EXISTS duration INTEGER;
-
-        CREATE TABLE IF NOT EXISTS media_blobs (
-          media_id VARCHAR(64) PRIMARY KEY REFERENCES media(id) ON DELETE CASCADE,
-          data BYTEA NOT NULL,
-          mime_type VARCHAR(128) NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS delivery_states (
-          message_id VARCHAR(64) NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-          user_id VARCHAR(64) NOT NULL REFERENCES users(id),
-          status VARCHAR(16) NOT NULL,
-          delivered_at BIGINT,
-          seen_at BIGINT,
-          PRIMARY KEY (message_id, user_id)
-        );
-      `);
-    } finally {
-      client.release();
+    if (
+      userIdType &&
+      userIdType !== 'character varying' &&
+      userIdType !== 'text'
+    ) {
+      throw new Error(
+        `Database schema mismatch: users.id is "${userIdType}", ` +
+        'but this application expects a string ID (VARCHAR). ' +
+        'Migrate the existing database before restarting the server.'
+      );
     }
+
+    // Sessions
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        token VARCHAR(128) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL
+      );
+    `);
+
+    // Rooms
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS rooms (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(128) NOT NULL,
+        code_hash VARCHAR(256) NOT NULL,
+        secret_code_hash VARCHAR(256),
+        is_hidden BOOLEAN NOT NULL DEFAULT FALSE,
+        owner_id VARCHAR(64) NOT NULL REFERENCES users(id),
+        lifetime_hours INT NOT NULL,
+        blur_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_rooms_expires_at
+        ON rooms(expires_at);
+
+      ALTER TABLE rooms
+        ADD COLUMN IF NOT EXISTS blur_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+    `);
+
+    // Room members
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS room_members (
+        room_id VARCHAR(64) NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role VARCHAR(16) NOT NULL,
+        is_locked BOOLEAN NOT NULL DEFAULT FALSE,
+        joined_at BIGINT NOT NULL,
+        PRIMARY KEY (room_id, user_id)
+      );
+    `);
+
+    // Kicked users
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS kicked_users (
+        room_id VARCHAR(64) NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kicked_at BIGINT NOT NULL,
+        PRIMARY KEY (room_id, user_id)
+      );
+    `);
+
+    // Room access credentials
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS room_access_credentials (
+        key VARCHAR(128) PRIMARY KEY,
+        room_id VARCHAR(64) NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        failed_attempts INT NOT NULL DEFAULT 0,
+        lock_until BIGINT NOT NULL DEFAULT 0,
+        last_attempt_at BIGINT NOT NULL
+      );
+    `);
+
+    // Messages
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id VARCHAR(64) PRIMARY KEY,
+        room_id VARCHAR(64) NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        sender_id VARCHAR(64) NOT NULL REFERENCES users(id),
+        sender_name VARCHAR(128) NOT NULL,
+        content TEXT NOT NULL,
+        type VARCHAR(16) NOT NULL,
+        reply_to_id VARCHAR(64),
+        is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+        is_blurred BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_messages_room_id
+        ON messages(room_id);
+
+      ALTER TABLE messages
+        ADD COLUMN IF NOT EXISTS is_blurred BOOLEAN NOT NULL DEFAULT TRUE;
+    `);
+
+    // Media
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS media (
+        id VARCHAR(64) PRIMARY KEY,
+        room_id VARCHAR(64) NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        message_id VARCHAR(64) NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        sender_id VARCHAR(64) NOT NULL REFERENCES users(id),
+        filename VARCHAR(256) NOT NULL,
+        original_name VARCHAR(256) NOT NULL,
+        mime_type VARCHAR(128) NOT NULL,
+        size BIGINT NOT NULL,
+        duration INTEGER,
+        storage_key VARCHAR(256) NOT NULL,
+        is_view_once BOOLEAN NOT NULL DEFAULT FALSE,
+        is_consumed BOOLEAN NOT NULL DEFAULT FALSE,
+        consumed_at BIGINT,
+        created_at BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_media_room_id ON media(room_id);
+
+      ALTER TABLE media
+        ADD COLUMN IF NOT EXISTS duration INTEGER;
+    `);
+
+    // Media blobs
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS media_blobs (
+        media_id VARCHAR(64) PRIMARY KEY
+          REFERENCES media(id) ON DELETE CASCADE,
+        data BYTEA NOT NULL,
+        mime_type VARCHAR(128) NOT NULL
+      );
+    `);
+
+    // Message delivery states
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS delivery_states (
+        message_id VARCHAR(64) NOT NULL
+          REFERENCES messages(id) ON DELETE CASCADE,
+        user_id VARCHAR(64) NOT NULL REFERENCES users(id),
+        status VARCHAR(16) NOT NULL,
+        delivered_at BIGINT,
+        seen_at BIGINT,
+        PRIMARY KEY (message_id, user_id)
+      );
+    `);
+
+    await client.query('COMMIT');
+    console.log('[2MinChat] PostgreSQL database initialized successfully.');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
+}
+
 
   async close(): Promise<void> {
     await this.pool.end();
